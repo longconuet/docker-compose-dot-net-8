@@ -4,6 +4,9 @@ using Products.Api.Database;
 using Products.Api.Entities;
 using Products.Api.Requests;
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json;
+using System.Text;
+using Microsoft.AspNetCore.Mvc;
 
 namespace Products.Api.Endpoints
 {
@@ -35,15 +38,61 @@ namespace Products.Api.Endpoints
 
             app.MapGet("products/{id}", async ([Required] Guid id, ApplicationDbContext context, IDistributedCache cache, CancellationToken ct) =>
             {
-                //var product = await context.Products.FirstOrDefaultAsync(x => x.Id == id);
-                var product = await cache.GetAsync($"products-{id}", async token =>
+                var options = new DistributedCacheEntryOptions()
+                    .SetSlidingExpiration(TimeSpan.FromSeconds(30));
+
+                Product product;
+                var productCache = await cache.GetAsync($"products-{id}");
+                if (productCache != null)
                 {
-                    var product = await context.Products.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, token);
-                    return product;
-                },
-                ct);
+                    product = JsonSerializer.Deserialize<Product>(Encoding.UTF8.GetString(productCache));
+                }
+                else
+                {
+                    product = await context.Products
+                       .AsNoTracking()
+                       .FirstOrDefaultAsync(p => p.Id == id, ct);
+
+                    string cachedDataString = JsonSerializer.Serialize(product);
+                    var dataToCache = Encoding.UTF8.GetBytes(cachedDataString);
+                    await cache.SetAsync($"products-{id}", dataToCache, options);
+                }
 
                 return product is null ? Results.NotFound() : Results.Ok(product);
+            });
+
+            app.MapPut("products/{id}", async ([Required] Guid id, [FromBody] UpdateProductRequest request, ApplicationDbContext context, IDistributedCache cache) =>
+            {
+                var product = context.Products.AsNoTracking().FirstOrDefault(p => p.Id == id);
+                if (product is null)
+                {
+                    return Results.NotFound();
+                }
+
+                product.Name = request.Name;
+                product.Price = request.Price;
+                context.Update(product);
+                await context.SaveChangesAsync();
+
+                await cache.RemoveAsync($"products-{id}");
+
+                return Results.NoContent();
+            });
+
+            app.MapDelete("products/{id}", async ([Required] Guid id, ApplicationDbContext context, IDistributedCache cache) =>
+            {
+                var product = context.Products.AsNoTracking().FirstOrDefault(p => p.Id == id);
+                if (product is null)
+                {
+                    return Results.NotFound();
+                }
+
+                context.Remove(product);
+                await context.SaveChangesAsync();
+
+                await cache.RemoveAsync($"products-{id}");
+
+                return Results.NoContent();
             });
         }
     }
